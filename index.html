@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Tree → Explode → Halo → Photo → Heart (Safe)</title>
+  <style>
+    html,body{height:100%;margin:0;background:#000;overflow:hidden}
+    #wrap{position:relative;height:100%}
+    canvas{display:block;width:100%;height:100%}
+    #ui{
+      position:absolute;left:12px;top:12px;z-index:5;
+      display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+      font:600 12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial;
+      color:rgba(255,255,255,.85)
+    }
+    #ui input{max-width:260px}
+    #msg{
+      position:absolute;left:50%;top:52%;transform:translate(-50%,-50%);
+      font:800 clamp(22px,4.6vw,52px)/1.05 system-ui,-apple-system,Segoe UI,Roboto,Arial;
+      letter-spacing:2px;
+      color:rgba(255,45,90,.96);
+      text-shadow:0 0 18px rgba(255,45,90,.65), 0 0 42px rgba(255,45,90,.35);
+      opacity:0;transition:opacity .35s ease;
+      user-select:none;pointer-events:none;white-space:nowrap;z-index:4
+    }
+    #hint{
+      position:absolute;left:12px;bottom:12px;z-index:6;
+      font:500 12px/1.2 system-ui;color:rgba(255,255,255,.65);
+      max-width:calc(100% - 24px);
+      white-space:pre-wrap;
+    }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+
+  <div id="ui">
+    <label>Message:
+      <input id="msgInput" type="text" value="Yêu nhất đấyy ❤️" />
+    </label>
+    <span style="opacity:.65">Default photo: <b>photo.jpg</b></span>
+  </div>
+
+  <div id="msg">Yêu nhất đấyy ❤️</div>
+  <div id="hint">Loading…</div>
+</div>
+
+<script type="module">
+(async () => {
+  const hint = document.getElementById("hint");
+  const setHint = (t, bad=false) => {
+    hint.textContent = t;
+    hint.style.color = bad ? "rgba(255,120,120,.95)" : "rgba(255,255,255,.65)";
+  };
+
+  try {
+    // ✅ ổn định hơn unpkg
+    const THREE = await import("https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js");
+
+    // Try load postprocessing. Nếu fail → fallback render thường (KHÔNG đen)
+    let postOK = true;
+    let EffectComposer, RenderPass, UnrealBloomPass, BokehPass;
+    try{
+      ({ EffectComposer } = await import("https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js"));
+      ({ RenderPass } = await import("https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/RenderPass.js"));
+      ({ UnrealBloomPass } = await import("https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js"));
+      ({ BokehPass } = await import("https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/postprocessing/BokehPass.js"));
+    }catch(e){
+      postOK = false;
+      setHint("Postprocessing OFF (không load được Bloom/DOF). Vẫn chạy bình thường.\n" + (e?.message || e), true);
+    }
+
+    // ---------------- utils ----------------
+    const lerp = (a,b,t)=>a+(b-a)*t;
+    const easeInOut = (t)=> (t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2);
+    const clamp01 = (x)=>Math.max(0,Math.min(1,x));
+
+    function makeCanvasTexture(drawFn, size=128){
+      const cnv=document.createElement("canvas");
+      cnv.width=cnv.height=size;
+      const ctx=cnv.getContext("2d");
+      drawFn(ctx,size);
+      const tex=new THREE.CanvasTexture(cnv);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.needsUpdate=true;
+      return tex;
+    }
+
+    function texCircle(size=64){
+      return makeCanvasTexture((ctx,s)=>{
+        const g=ctx.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);
+        g.addColorStop(0,"rgba(255,255,255,1)");
+        g.addColorStop(.25,"rgba(255,255,255,.85)");
+        g.addColorStop(1,"rgba(255,255,255,0)");
+        ctx.fillStyle=g;
+        ctx.beginPath();ctx.arc(s/2,s/2,s/2,0,Math.PI*2);ctx.fill();
+      }, size);
+    }
+
+    function texStar(size=128, color="rgba(255,220,90,1)"){
+      return makeCanvasTexture((ctx,s)=>{
+        ctx.translate(s/2,s/2);
+        ctx.fillStyle=color;
+        ctx.shadowColor=color;
+        ctx.shadowBlur=18;
+
+        const spikes=5, outerR=s*0.34, innerR=s*0.15;
+        let rot=Math.PI/2*3;
+        ctx.beginPath(); ctx.moveTo(0,-outerR);
+        for(let i=0;i<spikes;i++){
+          ctx.lineTo(Math.cos(rot)*outerR,Math.sin(rot)*outerR); rot+=Math.PI/spikes;
+          ctx.lineTo(Math.cos(rot)*innerR,Math.sin(rot)*innerR); rot+=Math.PI/spikes;
+        }
+        ctx.closePath(); ctx.fill();
+      }, size);
+    }
+
+    function texHeart(size=128, color="rgba(255,60,110,1)"){
+      return makeCanvasTexture((ctx,s)=>{
+        ctx.translate(s/2,s/2);
+        ctx.fillStyle=color;
+        ctx.shadowColor=color;
+        ctx.shadowBlur=18;
+
+        const scale = s*0.035;
+        ctx.beginPath();
+        for(let t=0;t<=Math.PI*2+0.02;t+=0.02){
+          const x = 16*Math.pow(Math.sin(t),3);
+          const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+          ctx.lineTo(x*scale, -y*scale);
+        }
+        ctx.closePath();
+        ctx.fill();
+      }, size);
+    }
+
+    function texGift(size=160){
+      return makeCanvasTexture((ctx,s)=>{
+        ctx.translate(s/2,s/2);
+        ctx.shadowColor="rgba(255,60,90,.55)";
+        ctx.shadowBlur=18;
+
+        ctx.fillStyle="rgba(255,40,75,1)";
+        roundRect(ctx, -s*0.22, -s*0.12, s*0.44, s*0.30, s*0.05, true, false);
+
+        ctx.fillStyle="rgba(255,55,90,1)";
+        roundRect(ctx, -s*0.25, -s*0.20, s*0.50, s*0.12, s*0.05, true, false);
+
+        ctx.fillStyle="rgba(255,255,255,.95)";
+        roundRect(ctx, -s*0.03, -s*0.20, s*0.06, s*0.38, s*0.02, true, false);
+        roundRect(ctx, -s*0.25, -s*0.04, s*0.50, s*0.06, s*0.02, true, false);
+
+        ctx.fillStyle="rgba(255,255,255,.95)";
+        ctx.beginPath();
+        ctx.ellipse(-s*0.06, -s*0.23, s*0.07, s*0.04, -0.2, 0, Math.PI*2);
+        ctx.ellipse( s*0.06, -s*0.23, s*0.07, s*0.04,  0.2, 0, Math.PI*2);
+        ctx.fill();
+      }, size);
+
+      function roundRect(ctx, x, y, w, h, r, fill, stroke){
+        if (w < 2*r) r = w/2;
+        if (h < 2*r) r = h/2;
+        ctx.beginPath();
+        ctx.moveTo(x+r, y);
+        ctx.arcTo(x+w, y,   x+w, y+h, r);
+        ctx.arcTo(x+w, y+h, x,   y+h, r);
+        ctx.arcTo(x,   y+h, x,   y,   r);
+        ctx.arcTo(x,   y,   x+w, y,   r);
+        ctx.closePath();
+        if (fill) ctx.fill();
+        if (stroke) ctx.stroke();
+      }
+    }
+
+    // ---------------- config ----------------
+    const DEFAULT_IMAGE_URL = "./photo.jpg";
+
+    const CONFIG = {
+      counts: { gold: 1600, hearts: 650, stars: 550, gifts: 450, fountain: 420 },
+      sizes:  { gold: 0.075, hearts: 0.11, stars: 0.11, gifts: 0.13, fountain: 0.085 },
+
+      treeHeight: 4.8,
+      treeRadius: 2.15,
+      explodeR: 4.25,
+      haloR: 3.6,
+      haloYSpread: 1.3,
+      heartScale: 0.12,
+      heartThickness: 0.65,
+
+      message: "Yêu nhất đấyy ❤️",
+    };
+
+    // ---------------- renderer/scene/cam ----------------
+    const canvas = document.getElementById("c");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:false });
+    renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+    renderer.setClearColor(0x000000, 1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.12;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 100);
+    camera.position.set(0, 0.8, 9);
+
+    const bgPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(16, 9),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent:true, opacity:0 })
+    );
+    bgPlane.position.set(0,0,-6);
+    scene.add(bgPlane);
+
+    // ---------------- postprocessing ----------------
+    let composer = null, bloomPass = null, bokehPass = null;
+    if(postOK){
+      composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+
+      bokehPass = new BokehPass(scene, camera, {
+        focus: 8.4,
+        aperture: 0.00012,
+        maxblur: 0.009,
+        width: 0, height: 0
+      });
+      composer.addPass(bokehPass);
+
+      bloomPass = new UnrealBloomPass(new THREE.Vector2(1,1), 1.25, 0.55, 0.10);
+      composer.addPass(bloomPass);
+    }
+
+    // ---------------- textures ----------------
+    const T = {
+      circle: texCircle(64),
+      star: texStar(128),
+      heart: texHeart(128),
+      gift: texGift(160),
+    };
+
+    // ---------------- particle layer factory ----------------
+    function createLayer({count, size, texture, baseColor, additive=true}){
+      const geo = new THREE.BufferGeometry();
+      const positions = new Float32Array(count*3);
+      const colors = new Float32Array(count*3);
+      const phases = new Float32Array(count);
+
+      for(let i=0;i<count;i++){
+        const idx=i*3;
+        positions[idx]= (Math.random()-0.5)*2;
+        positions[idx+1]=(Math.random()-0.5)*2;
+        positions[idx+2]=(Math.random()-0.5)*2;
+
+        const c = new THREE.Color(baseColor);
+        c.offsetHSL((Math.random()-0.5)*0.02, (Math.random()-0.5)*0.05, (Math.random()-0.5)*0.06);
+        colors[idx]=c.r; colors[idx+1]=c.g; colors[idx+2]=c.b;
+
+        phases[i]=Math.random()*Math.PI*2;
+      }
+
+      geo.setAttribute("position", new THREE.BufferAttribute(positions,3));
+      geo.setAttribute("color", new THREE.BufferAttribute(colors,3));
+
+      const mat = new THREE.PointsMaterial({
+        size,
+        map: texture,
+        transparent:true,
+        depthWrite:false,
+        vertexColors:true,
+        blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+      });
+
+      const points = new THREE.Points(geo, mat);
+      scene.add(points);
+
+      return { points, positions, phases, posAttr: geo.getAttribute("position") };
+    }
+
+    const layers = {
+      gold:     createLayer({count:CONFIG.counts.gold, size:CONFIG.sizes.gold, texture:T.circle, baseColor:"#ffdd6a"}),
+      hearts:   createLayer({count:CONFIG.counts.hearts, size:CONFIG.sizes.hearts, texture:T.heart, baseColor:"#ff3b7a"}),
+      stars:    createLayer({count:CONFIG.counts.stars, size:CONFIG.sizes.stars, texture:T.star, baseColor:"#ffe06a"}),
+      gifts:    createLayer({count:CONFIG.counts.gifts, size:CONFIG.sizes.gifts, texture:T.gift, baseColor:"#ff4a70", additive:false}),
+      fountain: createLayer({count:CONFIG.counts.fountain, size:CONFIG.sizes.fountain, texture:T.circle, baseColor:"#ffe06a"}),
+    };
+
+    // ---------------- targets ----------------
+    function buildTree(count){
+      const out = new Float32Array(count*3);
+      for(let i=0;i<count;i++){
+        const idx=i*3;
+        const h=Math.random()*CONFIG.treeHeight;
+        const y=h - CONFIG.treeHeight/2;
+        const maxR=(1-h/CONFIG.treeHeight)*CONFIG.treeRadius;
+        const r=maxR*Math.sqrt(Math.random());
+        const th=Math.random()*Math.PI*2;
+        out[idx]=r*Math.cos(th);
+        out[idx+1]=y;
+        out[idx+2]=r*Math.sin(th);
+      }
+      return out;
+    }
+
+    function buildExplode(count){
+      const out = new Float32Array(count*3);
+      for(let i=0;i<count;i++){
+        const idx=i*3;
+        const u=Math.random(), v=Math.random();
+        const phi=Math.acos(2*v-1);
+        const lam=2*Math.PI*u;
+        const rad=CONFIG.explodeR*Math.cbrt(Math.random());
+        out[idx]=rad*Math.sin(phi)*Math.cos(lam);
+        out[idx+1]=rad*Math.cos(phi);
+        out[idx+2]=rad*Math.sin(phi)*Math.sin(lam);
+      }
+      return out;
+    }
+
+    function buildHalo(count){
+      const out = new Float32Array(count*3);
+      for(let i=0;i<count;i++){
+        const idx=i*3;
+        const a=Math.random()*Math.PI*2;
+        const r=CONFIG.haloR*(0.75+0.35*Math.random());
+        const y=(Math.random()-0.5)*CONFIG.haloYSpread;
+        out[idx]=r*Math.cos(a);
+        out[idx+1]=y;
+        out[idx+2]=r*Math.sin(a);
+      }
+      return out;
+    }
+
+    function buildHeart(count){
+      const out = new Float32Array(count*3);
+      for(let i=0;i<count;i++){
+        const idx=i*3;
+        const t=Math.random()*Math.PI*2;
+        const x=16*Math.pow(Math.sin(t),3);
+        const y=13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t);
+        const z=(Math.random()-0.5)*CONFIG.heartThickness;
+        out[idx]=x*CONFIG.heartScale;
+        out[idx+1]=y*CONFIG.heartScale-0.15;
+        out[idx+2]=z;
+      }
+      return out;
+    }
+
+    function buildFountain(count){
+      const out = new Float32Array(count*3);
+      for(let i=0;i<count;i++){
+        const idx=i*3;
+        const y = lerp(-3.2, 1.1, Math.random());
+        const spread = 0.10 + 0.12*Math.random();
+        const a = Math.random()*Math.PI*2;
+        out[idx]=Math.cos(a)*spread;
+        out[idx+1]=y;
+        out[idx+2]=Math.sin(a)*spread;
+      }
+      return out;
+    }
+
+    function makeTargetsForLayer(layerName){
+      const count = CONFIG.counts[layerName];
+      return {
+        tree: buildTree(count),
+        explode: buildExplode(count),
+        halo: buildHalo(count),
+        heart: buildHeart(count),
+      };
+    }
+
+    const targets = {
+      gold: makeTargetsForLayer("gold"),
+      hearts: makeTargetsForLayer("hearts"),
+      stars: makeTargetsForLayer("stars"),
+      gifts: makeTargetsForLayer("gifts"),
+      fountain: {
+        tree: buildTree(CONFIG.counts.fountain),
+        explode: buildExplode(CONFIG.counts.fountain),
+        halo: buildHalo(CONFIG.counts.fountain),
+        heart: buildFountain(CONFIG.counts.fountain),
+      }
+    };
+
+    // ---------------- star top ----------------
+    const starTop = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: T.star, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending
+    }));
+    starTop.scale.set(1.15, 1.15, 1);
+    scene.add(starTop);
+
+    // ---------------- timeline ----------------
+    const timeline = [
+      { name:"tree",   ms: 5200 },
+      { name:"explode",ms: 1400 },
+      { name:"halo",   ms: 6500 },
+      { name:"photo",  ms: 3600 },
+      { name:"heart",  ms: 5200 },
+    ];
+    const totalMs = timeline.reduce((s,x)=>s+x.ms,0);
+
+    function stateAt(tMs){
+      let acc=0;
+      for(let i=0;i<timeline.length;i++){
+        const seg=timeline[i];
+        if(tMs < acc + seg.ms){
+          const local=(tMs-acc)/seg.ms;
+          const next=timeline[(i+1)%timeline.length].name;
+          return { cur: seg.name, next, p: local };
+        }
+        acc += seg.ms;
+      }
+      return { cur: timeline[0].name, next: timeline[1].name, p: 0 };
+    }
+
+    // ---------------- UI message ----------------
+    const msgDiv = document.getElementById("msg");
+    const msgInput = document.getElementById("msgInput");
+    msgInput.addEventListener("input", ()=>{
+      CONFIG.message = msgInput.value || "I LOVE YOU ❤️";
+      msgDiv.textContent = CONFIG.message;
+    });
+
+    // ---------------- load default photo.jpg (only for bg at heart) ----------------
+    const imgLoader = new THREE.TextureLoader();
+    imgLoader.load(
+      DEFAULT_IMAGE_URL,
+      (tex)=>{
+        tex.colorSpace = THREE.SRGBColorSpace;
+        bgPlane.material.map = tex;
+        bgPlane.material.needsUpdate = true;
+        setHint(postOK ? "Running (Bloom+DOF ON)" : "Running (Post OFF)");
+      },
+      undefined,
+      (err)=>{
+        setHint("Không load được photo.jpg (nhưng particles vẫn chạy).\nHãy để ảnh cùng thư mục và đặt tên photo.jpg", true);
+        console.warn(err);
+      }
+    );
+
+    // ---------------- resize ----------------
+    function resize(){
+      const w=canvas.clientWidth, h=canvas.clientHeight;
+      renderer.setSize(w,h,false);
+      camera.aspect=w/h;
+      camera.updateProjectionMatrix();
+
+      if(composer){
+        composer.setSize(w,h);
+        bloomPass?.setSize(w,h);
+      }
+
+      const aspect = w/h;
+      const baseW=16, baseH=9;
+      if(aspect>baseW/baseH){
+        bgPlane.scale.set(aspect/(baseW/baseH), 1, 1);
+      } else {
+        bgPlane.scale.set(1, (baseW/baseH)/aspect, 1);
+      }
+    }
+    addEventListener("resize", resize, {passive:true});
+    resize();
+
+    // ---------------- animate ----------------
+    function updateLayer(layerKey, fromName, toName, tEased, now){
+      const L = layers[layerKey];
+      const A = targets[layerKey][fromName] ?? targets[layerKey].tree;
+      const B = targets[layerKey][toName] ?? targets[layerKey].tree;
+
+      const count = CONFIG.counts[layerKey];
+      const P = L.positions;
+      const ph = L.phases;
+
+      for(let i=0;i<count;i++){
+        const idx=i*3;
+        let x = lerp(A[idx],   B[idx],   tEased);
+        let y = lerp(A[idx+1], B[idx+1], tEased);
+        let z = lerp(A[idx+2], B[idx+2], tEased);
+
+        const wig = 0.05*Math.sin(now*0.003 + ph[i]);
+        x += wig*0.25; y += wig*0.22; z += wig*0.25;
+
+        if(fromName==="halo" || toName==="halo" || fromName==="photo" || toName==="photo"){
+          const a = now*0.00085 + ph[i];
+          const sx=x, sz=z;
+          x = sx*Math.cos(a) - sz*Math.sin(a);
+          z = sx*Math.sin(a) + sz*Math.cos(a);
+        }
+
+        P[idx]=x; P[idx+1]=y; P[idx+2]=z;
+      }
+      L.posAttr.needsUpdate = true;
+    }
+
+    function animate(now){
+      requestAnimationFrame(animate);
+
+      const t = now % totalMs;
+      const {cur, next, p} = stateAt(t);
+      const tt = easeInOut(p);
+
+      camera.position.x = Math.sin(now*0.00022)*1.15;
+      camera.position.z = 9.2 + Math.cos(now*0.00022)*0.65;
+      camera.lookAt(0,0,0);
+
+      // ✅ ngôi sao đúng chóp cây
+      const showStar = (cur==="tree" && p<0.98) || (next==="tree" && p>0.05);
+      starTop.visible = showStar;
+      starTop.position.set(0, CONFIG.treeHeight/2 + 0.35, 0);
+
+      // background + message ở heart
+      const wantBG = (cur==="heart" || next==="heart");
+      bgPlane.material.opacity = 0.85; // luôn hiện ảnh nền
+      msgDiv.textContent = CONFIG.message;
+      msgDiv.style.opacity = wantBG ? "1" : "0";
+
+      // photo dùng halo positions
+      const mapName = (name)=> (name==="photo" ? "halo" : name);
+      const from = mapName(cur);
+      const to   = mapName(next);
+
+      updateLayer("gold", from, to, tt, now);
+      updateLayer("hearts", from, to, tt, now);
+      updateLayer("stars", from, to, tt, now);
+      updateLayer("gifts", from, to, tt, now);
+      updateLayer("fountain", from, to, tt, now);
+
+      // render
+      if(composer) composer.render();
+      else renderer.render(scene, camera);
+    }
+
+    requestAnimationFrame(animate);
+
+  } catch (e) {
+    console.error(e);
+    document.getElementById("hint").textContent =
+      "SCRIPT ERROR (vì thế canvas đen):\n" + (e?.message || e) +
+      "\n\nMẹo: tắt AdBlock/VPN hoặc đổi mạng rồi refresh.";
+    document.getElementById("hint").style.color = "rgba(255,120,120,.95)";
+  }
+})();
+</script>
+</body>
+</html>
